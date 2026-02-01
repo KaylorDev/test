@@ -26,24 +26,22 @@ class TTSEngine:
                     self.model_name,
                     device_map=self.device,
                     dtype=dtype,
-                    attn_implementation="flash_attention_2" if self.device == "cuda" else None 
+                    attn_implementation="sdpa"
                 )
-                print(f"Model {self.model_name} loaded successfully.")
+                print(f"Model {self.model_name} loaded successfully with SDPA.")
             except Exception as e:
                 print(f"Error loading model: {e}")
-                # Fallback to standard attention if flash_attention_2 fails
-                if "flash_attention_2" in str(e):
-                    print("Retrying without Flash Attention 2...")
-                    from qwen_tts import Qwen3TTSModel
-                    dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
-                    self.model = Qwen3TTSModel.from_pretrained(
-                        self.model_name,
-                        device_map=self.device,
-                        dtype=dtype
-                    )
-                    print(f"Model {self.model_name} loaded with standard attention.")
-                else:
-                    raise e
+                # Fallback to standard attention if sdpa fails (unlikely, but good to have)
+                print("Retrying with default attention...")
+                from qwen_tts import Qwen3TTSModel
+                dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+                self.model = Qwen3TTSModel.from_pretrained(
+                    self.model_name,
+                    device_map=self.device,
+                    dtype=dtype,
+                    attn_implementation="eager"
+                )
+                print(f"Model {self.model_name} loaded with standard (eager) attention.")
 
     def switch_model(self, new_model_name):
         if self.model_name == new_model_name and self.model is not None:

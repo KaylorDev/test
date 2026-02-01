@@ -7,3 +7,6 @@ torch
 torchaudio
 soundfile
 numpy
+librosa
+sox
+onnxruntime
