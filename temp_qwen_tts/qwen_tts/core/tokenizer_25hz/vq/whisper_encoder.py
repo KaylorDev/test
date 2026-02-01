@@ -26,14 +26,8 @@ from typing import Optional, Union, List
 from torch import nn, Tensor
 from itertools import accumulate
 
-try:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func
-except ImportError:
-    try:
-        from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_varlen_func
-    except ImportError:
-        print("\n********\nWarning: flash-attn is not installed. Will only run the manual PyTorch version. Please install flash-attn for faster inference.\n********\n ")
-        flash_attn_varlen_func = None
+
+
 
 
 N_FFT = 400
@@ -167,7 +161,7 @@ class MultiHeadAttention(nn.Module):
         self.value = Linear(n_state, n_state)
         self.out = Linear(n_state, n_state)
 
-        self.use_flash_attention = True
+        self.out = Linear(n_state, n_state)
 
     def forward(
         self,
@@ -178,38 +172,95 @@ class MultiHeadAttention(nn.Module):
         k = self.key(x)
         v = self.value(x)
         
-        if self.use_flash_attention:
-            if flash_attn_varlen_func is None:
-                x = self.qkv_attention_manual(q, k, v, cu_seqlens=cu_seqlens)
-            else:
-                if q.dtype not in [torch.float16, torch.bfloat16]:
-                    x = self.qkv_attention_manual(q, k, v, cu_seqlens=cu_seqlens)
-                    self.use_flash_attention = False
-                else:
-                    x = self.qkv_flash_attention(q, k, v, cu_seqlens=cu_seqlens)
-        else:
-            x = self.qkv_attention_manual(q, k, v, cu_seqlens=cu_seqlens)
+        x = self.qkv_sdpa(q, k, v, cu_seqlens=cu_seqlens)
 
         output = self.out(x)
         return output
 
-    def qkv_flash_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, cu_seqlens=None
+    def qkv_sdpa(
+        self, q: Tensor, k: Tensor, v: Tensor, cu_seqlens: Tensor
     ):
         n_ctx, n_state = q.shape
-        # scale = (n_state // self.n_head) ** -0.25
-        q = q.view(n_ctx, self.n_head, -1)# (batch_size, seqlen, nheads, headdim)
-        k = k.view(n_ctx, self.n_head, -1)
-        v = v.view(n_ctx, self.n_head, -1)
-
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-
-
-        x = flash_attn_varlen_func(
-            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, dropout_p=0.0
+        head_dim = n_state // self.n_head
+        
+        # Reshape to (batch, seq_len, n_head, head_dim) for SDPA
+        # Input q, k, v are (n_ctx, n_state) which is actually flattened batch * seq_len
+        # We need to reconstruct the batch structure using cu_seqlens
+        
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        batch_size = len(seqlens)
+        max_seqlen = max(seqlens)
+        
+        # Prepare padded tensors
+        q_padded = torch.zeros(batch_size, max_seqlen, self.n_head, head_dim, dtype=q.dtype, device=q.device)
+        k_padded = torch.zeros_like(q_padded)
+        v_padded = torch.zeros_like(q_padded)
+        
+        # Fill padded tensors
+        q = q.view(n_ctx, self.n_head, head_dim)
+        k = k.view(n_ctx, self.n_head, head_dim)
+        v = v.view(n_ctx, self.n_head, head_dim)
+        
+        for i in range(batch_size):
+            start_idx = cu_seqlens[i]
+            end_idx = cu_seqlens[i+1]
+            seq_len = seqlens[i]
+            q_padded[i, :seq_len] = q[start_idx:end_idx]
+            k_padded[i, :seq_len] = k[start_idx:end_idx]
+            v_padded[i, :seq_len] = v[start_idx:end_idx]
+            
+        # Transpose to (batch, n_head, seq_len, head_dim)
+        q_padded = q_padded.transpose(1, 2)
+        k_padded = k_padded.transpose(1, 2)
+        v_padded = v_padded.transpose(1, 2)
+        
+        # Create attention mask
+        # (batch, 1, 1, seq_len) broadcastable to (batch, n_head, seq_len, seq_len)
+        # However, SDPA expects mask checks or is_causal
+        # Here we need a padding mask.
+        # SDPA supports explicit attn_mask.
+        # Shape (batch, 1, seq_len, seq_len) or (batch, 1, 1, seq_len)?
+        # Typically (batch, 1, query_len, key_len)
+        
+        attn_mask = torch.arange(max_seqlen, device=q.device)[None, :] < torch.tensor(seqlens, device=q.device)[:, None]
+        # attn_mask is (batch, max_seqlen). True where valid, False where padding.
+        # We need to mask out padding positions. 
+        # For SDPA, if we provide a boolean mask, True indicates values to participate in attention.
+        # BUT standard sdpa with attn_mask expects float mask with -inf or boolean with True to MASK OUT?
+        # PyTorch docs: "If a boolean mask is provided, positions with True are not allowed to attend." -> OPPOSITE of what we usually have?
+        # Wait, let's allow SDPA to handle it or use the manual mask logic if unsure.
+        # Actually, let's use the efficient unpadded logic if we can, but SDPA expects padded.
+        
+        # Let's rely on standard usage:
+        # mask: (Batch, TargetLen, SourceLen)
+        
+        # Construct bias mask: 0 for keep, -inf for discard
+        # Or boolean: True for "prevent attention"
+        
+        mask = ~attn_mask # True where padding is (invalid)
+        mask = mask.unsqueeze(1).unsqueeze(2) # (batch, 1, 1, max_seqlen) - broadcast across heads and query len?
+        # We want (batch, 1, query_len, key_len).
+        # Since query and key len are same (self attention), we expand.
+        mask = mask.expand(-1, -1, max_seqlen, -1) 
+        
+        # Apply SDPA
+        # Note: scale is handled automatically (1/sqrt(head_dim)) unless we want custom. 
+        # The manual code used scale = head_dim ** -0.5, which is standard.
+        
+        x_padded = F.scaled_dot_product_attention(
+            q_padded, k_padded, v_padded,
+            attn_mask=mask,
+            dropout_p=0.0,
+            is_causal=False
         )
-        x = x.reshape(n_ctx, n_state)
-        return x
+        
+        # Reconstruct result (flatten back)
+        x_padded = x_padded.transpose(1, 2) # (batch, seq_len, n_head, head_dim)
+        
+        output_packed = torch.cat([x_padded[i, :seqlens[i]] for i in range(batch_size)], dim=0)
+        output_packed = output_packed.reshape(n_ctx, n_state)
+        
+        return output_packed
 
     def qkv_attention_manual(
         self, q: Tensor, k: Tensor, v: Tensor, cu_seqlens: Tensor

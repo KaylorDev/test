@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice\n"
             "  qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --port 8000 --ip 127.0.0.01\n"
             "  qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-Base --device cuda:0\n"
-            "  qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --dtype bfloat16 --no-flash-attn\n"
+            "  qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --dtype bfloat16\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         add_help=True,
@@ -101,11 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Torch dtype for loading the model (default: bfloat16).",
     )
     parser.add_argument(
-        "--flash-attn/--no-flash-attn",
-        dest="flash_attn",
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help="Enable FlashAttention-2 (default: enabled).",
+        "--attn-implementation",
+        default="sdpa",
+        choices=["sdpa", "eager", "flash_attention_2"],
+        help="Attention implementation (default: sdpa).",
     )
 
     # Gradio server args
@@ -603,13 +602,11 @@ def main(argv=None) -> int:
     ckpt = _resolve_checkpoint(args)
 
     dtype = _dtype_from_str(args.dtype)
-    attn_impl = "flash_attention_2" if args.flash_attn else None
-
     tts = Qwen3TTSModel.from_pretrained(
         ckpt,
         device_map=args.device,
         dtype=dtype,
-        attn_implementation=attn_impl,
+        attn_implementation=args.attn_implementation,
     )
 
     gen_kwargs_default = _collect_gen_kwargs(args)
