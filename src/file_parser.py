@@ -99,12 +99,25 @@ def split_text_into_chunks(text, max_chars=400):
     current_chunk = ""
     
     for token in tokens:
-        # If adding this token significantly exceeds max_chars, start a new chunk
-        # But if the token itself is huge (e.g. valid code or weird text), we might have to split it hard
-        # For now, let's just append and check size
-        
-        if len(current_chunk) + len(token) > max_chars and len(current_chunk) > 0:
-            chunks.append(current_chunk.strip())
+        # If adding this token exceeds max_chars
+        if len(current_chunk) + len(token) > max_chars:
+            if len(current_chunk) > 0:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            
+            # If the token itself is still huge (larger than max_chars), we must split it hard
+            if len(token) > max_chars:
+                # Split token into N pieces
+                for i in range(0, len(token), max_chars):
+                    sub_token = token[i:i+max_chars]
+                    # If this is the last piece and it fits in next chunk, just keep it in current_chunk
+                    # But for simplicity, just treat these as full chunks if they are big
+                    if len(sub_token) > max_chars * 0.8: # If it's a big chunk
+                        chunks.append(sub_token.strip())
+                    else:
+                        current_chunk = sub_token
+                continue
+            
             current_chunk = token
         else:
             current_chunk += token

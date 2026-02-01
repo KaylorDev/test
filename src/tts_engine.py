@@ -43,6 +43,15 @@ class TTSEngine:
                 )
                 print(f"Model {self.model_name} loaded with standard (eager) attention.")
 
+        # Try to optimize with torch.compile (PyTorch 2.0+)
+        try:
+            if hasattr(torch, "compile") and self.device == "cuda":
+                print("Compiling model with torch.compile...")
+                # Reduce overhead mode is good for small batches/real-time
+                self.model.model = torch.compile(self.model.model, mode="reduce-overhead")
+        except Exception as e:
+            print(f"Compilation warning: {e}")
+
     def switch_model(self, new_model_name):
         if self.model_name == new_model_name and self.model is not None:
             print(f"Model {new_model_name} is already loaded.")
