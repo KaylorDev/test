@@ -1,0 +1,7 @@
+qwen-tts
+gradio
+ebooklib
+beautifulsoup4
+xmltodict
+torch
+torchaudio
