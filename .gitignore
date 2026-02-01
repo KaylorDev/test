@@ -2,7 +2,6 @@ venv/
 .venv/
 __pycache__/
 *.pyc
-temp_qwen_tts/
 outputs/
 *.wav
 .env
