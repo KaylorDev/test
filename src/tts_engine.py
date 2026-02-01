@@ -69,7 +69,11 @@ class TTSEngine:
         voice_prompt: Result of create_voice_prompt or None
         progress_callback: Optional function to call with (progress_0_to_1, status_message)
         """
+        import time
+        t_start_load = time.time()
         self.load_model()
+        print(f"Model consistency check: {self.model.device} | {self.model.dtype}")
+        print(f"Time to ensure model loaded: {time.time() - t_start_load:.4f}s")
         
         chunks = split_text_into_chunks(text)
         all_audio = []
@@ -80,6 +84,7 @@ class TTSEngine:
         
         try:
             for i, chunk in enumerate(chunks):
+                t_chunk_start = time.time()
                 if progress_callback:
                     progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
                 
@@ -95,6 +100,11 @@ class TTSEngine:
                     # Base model behavior fallback or error
                      return None, None
                 
+                t_chunk_end = time.time()
+                chunk_dur = len(wavs[0]) / current_sr if len(wavs) > 0 else 0
+                gen_dur = t_chunk_end - t_chunk_start
+                print(f"Chunk {i+1} generated {chunk_dur:.2f}s audio in {gen_dur:.2f}s (RTF: {gen_dur/chunk_dur if chunk_dur > 0 else 0:.2f})")
+
                 sr = current_sr
                 if len(wavs) > 0:
                     all_audio.append(wavs[0])
