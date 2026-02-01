@@ -40,7 +40,7 @@ def process_file_or_text(text_input, file_input):
             
     return content
 
-def generate_speech(text, file, voice_ref_audio, voice_ref_text):
+def generate_speech(text, file, voice_ref_audio, voice_ref_text, progress=gr.Progress()):
     global current_voice_prompt
     
     # 1. Get content
@@ -55,19 +55,24 @@ def generate_speech(text, file, voice_ref_audio, voice_ref_text):
     
     status_msg = f"Генерация для {len(content)} символов..."
     print(status_msg)
+    progress(0, desc="Подготовка...")
     
     try:
         audio = None
         sr = None
         
+        # Define a callback wrapper for Gradio progress
+        def progress_wrapper(pct, msg):
+            progress(pct, desc=msg)
+        
         if voice_ref_audio is not None and voice_ref_text and len(voice_ref_text.strip()) > 0:
              # One-shot cloning
              print("Используется загруженный образец для клонирования.")
-             audio, sr = engine.generate_with_audio_ref(content, voice_ref_audio, voice_ref_text)
+             audio, sr = engine.generate_with_audio_ref(content, voice_ref_audio, voice_ref_text, progress_callback=progress_wrapper)
         elif current_voice_prompt is not None:
              # Use stored prompt
              print("Используется сохраненный профиль голоса.")
-             audio, sr = engine.generate(content, voice_prompt=current_voice_prompt)
+             audio, sr = engine.generate(content, voice_prompt=current_voice_prompt, progress_callback=progress_wrapper)
         else:
              return None, "Ошибка: Вы должны предоставить образец голоса (аудио + текст) или создать профиль."
              

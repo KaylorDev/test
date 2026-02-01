@@ -2,6 +2,9 @@ import torch
 import soundfile as sf
 import os
 import uuid
+import uuid
+import numpy as np
+from file_parser import split_text_into_chunks
 # from qwen_tts import Qwen3TTSModel # Import will happen inside class to allow lazy loading or handle import errors gracefully
 
 class TTSEngine:
@@ -62,34 +65,53 @@ class TTSEngine:
         # The model will be loaded on the next generate() or create_voice_prompt() call via load_model()
         self.load_model()
 
-    def generate(self, text, voice_prompt=None, language="auto"):
+    def generate(self, text, voice_prompt=None, language="auto", progress_callback=None):
         """
         Generates audio from text.
-        voice_prompt: Result of create_voice_prompt or None (for default handling, though Base model needs a prompt or it might fail/be random)
+        voice_prompt: Result of create_voice_prompt or None
+        progress_callback: Optional function to call with (progress_0_to_1, status_message)
         """
         self.load_model()
         
-        # If no voice prompt is provided for Base model, we might need a default one or use a different generation method.
-        # But Base model requires reference audio for cloning usually. 
-        # Actually Qwen3-TTS Base acts as a voice cloner.
+        chunks = split_text_into_chunks(text)
+        all_audio = []
+        sr = 24000 # Default Qwen used usually, serves as fallback
+        
+        total_chunks = len(chunks)
+        print(f"Total chunks to process: {total_chunks}")
         
         try:
-            if voice_prompt:
-                 wavs, sr = self.model.generate_voice_clone(
-                    text=text,
-                    language=language,
-                    voice_clone_prompt=voice_prompt
-                )
-            else:
-                # If no prompt, we can't really "clone".
-                # Maybe we should use a default reference if user didn't provide one?
-                # Or just error out.
-                # Let's assume the UI enforces having a voice selected.
-                return None, None
+            for i, chunk in enumerate(chunks):
+                if progress_callback:
+                    progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
+                
+                print(f"Processing chunk {i+1}/{total_chunks}: {chunk[:50]}...")
+                
+                if voice_prompt:
+                     wavs, current_sr = self.model.generate_voice_clone(
+                        text=chunk,
+                        language=language,
+                        voice_clone_prompt=voice_prompt
+                    )
+                else:
+                    # Base model behavior fallback or error
+                     return None, None
+                
+                sr = current_sr
+                if len(wavs) > 0:
+                    all_audio.append(wavs[0])
             
-            return wavs[0], sr
+            if not all_audio:
+                return None, None
+                
+            # Stitch audio
+            final_audio = np.concatenate(all_audio)
+            return final_audio, sr
+            
         except Exception as e:
             print(f"Generation error: {e}")
+            import traceback
+            traceback.print_exc()
             return None, None
 
     def create_voice_prompt(self, audio_path, transcript):
@@ -113,19 +135,41 @@ class TTSEngine:
             print(f"Error creating voice prompt: {e}")
             return None
 
-    def generate_with_audio_ref(self, text, ref_audio_path, ref_text, language="auto"):
+    def generate_with_audio_ref(self, text, ref_audio_path, ref_text, language="auto", progress_callback=None):
         """
         One-shot generation with direct reference audio (no pre-computed prompt).
         """
         self.load_model()
+        
+        chunks = split_text_into_chunks(text)
+        all_audio = []
+        sr = 24000
+        total_chunks = len(chunks)
+        print(f"Total chunks to process (One-Shot): {total_chunks}")
+
         try:
-            wavs, sr = self.model.generate_voice_clone(
-                text=text,
-                language=language,
-                ref_audio=ref_audio_path,
-                ref_text=ref_text
-            )
-            return wavs[0], sr
+            for i, chunk in enumerate(chunks):
+                if progress_callback:
+                    progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
+                
+                print(f"Processing chunk {i+1}/{total_chunks}...")
+
+                wavs, current_sr = self.model.generate_voice_clone(
+                    text=chunk,
+                    language=language,
+                    ref_audio=ref_audio_path,
+                    ref_text=ref_text
+                )
+                sr = current_sr
+                if len(wavs) > 0:
+                    all_audio.append(wavs[0])
+            
+            if not all_audio:
+                return None, None
+                
+            final_audio = np.concatenate(all_audio)
+            return final_audio, sr
+            
         except Exception as e:
             print(f"One-shot generation error: {e}")
             return None, None

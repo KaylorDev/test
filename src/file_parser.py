@@ -84,3 +84,33 @@ def extract_text_from_section(section, text_parts):
                 subsections = [subsections]
             for sub in subsections:
                 extract_text_from_section(sub, text_parts)
+
+def split_text_into_chunks(text, max_chars=400):
+    """
+    Splits text into chunks of approximately max_chars length,
+    respecting sentence boundaries (. ? ! \n).
+    """
+    import re
+    # Split by sentence delimiters or newlines, keeping the delimiters
+    # The regex matches (. ? ! followed by space or end of string) or newlines
+    tokens = re.split(r'([.?!]+(?:\s+|$)|[\n]+)', text)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for token in tokens:
+        # If adding this token significantly exceeds max_chars, start a new chunk
+        # But if the token itself is huge (e.g. valid code or weird text), we might have to split it hard
+        # For now, let's just append and check size
+        
+        if len(current_chunk) + len(token) > max_chars and len(current_chunk) > 0:
+            chunks.append(current_chunk.strip())
+            current_chunk = token
+        else:
+            current_chunk += token
+            
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+        
+    return [c for c in chunks if c]
+

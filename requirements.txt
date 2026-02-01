@@ -5,3 +5,5 @@ beautifulsoup4
 xmltodict
 torch
 torchaudio
+soundfile
+numpy
