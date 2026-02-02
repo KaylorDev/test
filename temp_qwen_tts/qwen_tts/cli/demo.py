@@ -530,7 +530,7 @@ Upload a previously saved voice file, then synthesize new text.
                                 return None, "Target text is required (必须填写待合成文本)."
 
                             path = getattr(file_obj, "name", None) or getattr(file_obj, "path", None) or str(file_obj)
-                            payload = torch.load(path, map_location="cpu", weights_only=True)
+                            payload = torch.load(path, map_location="cpu", weights_only=False)
                             if not isinstance(payload, dict) or "items" not in payload:
                                 return None, "Invalid file format (文件格式不正确)."
 

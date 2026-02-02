@@ -82,7 +82,7 @@ class TTSEngine:
         import time
         t_start_load = time.time()
         self.load_model()
-        print(f"Model consistency check: {self.model.device} | {self.model.dtype}")
+        print(f"Model consistency check: {getattr(self.model, 'device', 'unknown')} | {getattr(self.model, 'dtype', getattr(self.model.model, 'dtype', 'unknown'))}")
         print(f"Time to ensure model loaded: {time.time() - t_start_load:.4f}s")
         
         chunks = split_text_into_chunks(text)
@@ -157,7 +157,14 @@ class TTSEngine:
 
     def save_voice_prompt(self, prompt, path):
         try:
-            torch.save(prompt, path)
+            # prompt is a list of VoiceClonePromptItem
+            # We serialize it to dicts to avoid pickle dependency issues with custom classes
+            from dataclasses import asdict
+            payload = {
+                "items": [asdict(it) for it in prompt],
+                "version": "1.0"
+            }
+            torch.save(payload, path)
             print(f"Saved voice prompt to {path}")
             return True
         except Exception as e:
@@ -166,11 +173,57 @@ class TTSEngine:
 
     def load_voice_prompt(self, path):
         try:
-            prompt = torch.load(path) # default map_location?
-            print(f"Loaded voice prompt from {path}")
-            return prompt
+            # We need the class definition to reconstruct
+            from qwen_tts import VoiceClonePromptItem
+            
+            payload = torch.load(path, map_location=self.device) # weights_only=False by default usually, but explicit is safer if needed
+            
+            # Handle legacy (pickle) or new (dict) format
+            if isinstance(payload, list): 
+                # Old format (if any exist, though user just started) or direct pickle
+                # This might fail if class not found, but if it loaded, great.
+                print(f"Loaded legacy/list voice prompt from {path}")
+                return payload
+            
+            if isinstance(payload, dict) and "items" in payload:
+                items_raw = payload["items"]
+                items = []
+                for d in items_raw:
+                     # Reconstruct items
+                    ref_code = d.get("ref_code")
+                    if ref_code is not None and not torch.is_tensor(ref_code):
+                        ref_code = torch.tensor(ref_code)
+                    
+                    ref_spk = d.get("ref_spk_embedding")
+                    if ref_spk is None:
+                        continue # Should not happen
+                    if not torch.is_tensor(ref_spk):
+                        ref_spk = torch.tensor(ref_spk)
+                        
+                    # Move to device
+                    if ref_code is not None:
+                        ref_code = ref_code.to(self.device)
+                    ref_spk = ref_spk.to(self.device)
+
+                    item = VoiceClonePromptItem(
+                        ref_code=ref_code,
+                        ref_spk_embedding=ref_spk,
+                        x_vector_only_mode=bool(d.get("x_vector_only_mode", False)),
+                        icl_mode=bool(d.get("icl_mode", not bool(d.get("x_vector_only_mode", False)))),
+                        ref_text=d.get("ref_text", None),
+                    )
+                    items.append(item)
+                
+                print(f"Loaded voice prompt from {path} to {self.device}")
+                return items
+            
+            print("Unknown voice prompt format.")
+            return None
+
         except Exception as e:
             print(f"Error loading voice prompt: {e}")
+            # If pickle error, it might be because Qwen3TTSModel uses local class definitions?
+            # Trying to import them might help.
             return None
 
     def generate_with_audio_ref(self, text, ref_audio_path, ref_text, language="auto", progress_callback=None):
