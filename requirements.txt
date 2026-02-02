@@ -10,3 +10,4 @@ numpy
 librosa
 sox
 onnxruntime
+psutil

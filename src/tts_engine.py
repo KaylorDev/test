@@ -93,31 +93,32 @@ class TTSEngine:
         print(f"Total chunks to process: {total_chunks}")
         
         try:
-            for i, chunk in enumerate(chunks):
-                t_chunk_start = time.time()
-                if progress_callback:
-                    progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
-                
-                print(f"Processing chunk {i+1}/{total_chunks}: {chunk[:50]}...")
-                
-                if voice_prompt:
-                     wavs, current_sr = self.model.generate_voice_clone(
-                        text=chunk,
-                        language=language,
-                        voice_clone_prompt=voice_prompt
-                    )
-                else:
-                    # Base model behavior fallback or error
-                     return None, None
-                
-                t_chunk_end = time.time()
-                chunk_dur = len(wavs[0]) / current_sr if len(wavs) > 0 else 0
-                gen_dur = t_chunk_end - t_chunk_start
-                print(f"Chunk {i+1} generated {chunk_dur:.2f}s audio in {gen_dur:.2f}s (RTF: {gen_dur/chunk_dur if chunk_dur > 0 else 0:.2f})")
+            with torch.inference_mode():
+                for i, chunk in enumerate(chunks):
+                    t_chunk_start = time.time()
+                    if progress_callback:
+                        progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
+                    
+                    print(f"Processing chunk {i+1}/{total_chunks}: {chunk[:50]}...")
+                    
+                    if voice_prompt:
+                         wavs, current_sr = self.model.generate_voice_clone(
+                            text=chunk,
+                            language=language,
+                            voice_clone_prompt=voice_prompt
+                        )
+                    else:
+                        # Base model behavior fallback or error
+                         return None, None
+                    
+                    t_chunk_end = time.time()
+                    chunk_dur = len(wavs[0]) / current_sr if len(wavs) > 0 else 0
+                    gen_dur = t_chunk_end - t_chunk_start
+                    print(f"Chunk {i+1} generated {chunk_dur:.2f}s audio in {gen_dur:.2f}s (RTF: {gen_dur/chunk_dur if chunk_dur > 0 else 0:.2f})")
 
-                sr = current_sr
-                if len(wavs) > 0:
-                    all_audio.append(wavs[0])
+                    sr = current_sr
+                    if len(wavs) > 0:
+                        all_audio.append(wavs[0])
             
             if not all_audio:
                 return None, None
@@ -144,10 +145,11 @@ class TTSEngine:
             # If transcript is missing, we could try x_vector_only_mode=True?
             # But the user requirements mentioned "copy voice by fragment".
             
-            prompt = self.model.create_voice_clone_prompt(
-                ref_audio=audio_path,
-                ref_text=transcript
-            )
+            with torch.inference_mode():
+                prompt = self.model.create_voice_clone_prompt(
+                    ref_audio=audio_path,
+                    ref_text=transcript
+                )
             return prompt
         except Exception as e:
             print(f"Error creating voice prompt: {e}")
@@ -184,21 +186,22 @@ class TTSEngine:
         print(f"Total chunks to process (One-Shot): {total_chunks}")
 
         try:
-            for i, chunk in enumerate(chunks):
-                if progress_callback:
-                    progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
-                
-                print(f"Processing chunk {i+1}/{total_chunks}...")
+            with torch.inference_mode():
+                for i, chunk in enumerate(chunks):
+                    if progress_callback:
+                        progress_callback((i / total_chunks), f"Генерация части {i+1} из {total_chunks}...")
+                    
+                    print(f"Processing chunk {i+1}/{total_chunks}...")
 
-                wavs, current_sr = self.model.generate_voice_clone(
-                    text=chunk,
-                    language=language,
-                    ref_audio=ref_audio_path,
-                    ref_text=ref_text
-                )
-                sr = current_sr
-                if len(wavs) > 0:
-                    all_audio.append(wavs[0])
+                    wavs, current_sr = self.model.generate_voice_clone(
+                        text=chunk,
+                        language=language,
+                        ref_audio=ref_audio_path,
+                        ref_text=ref_text
+                    )
+                    sr = current_sr
+                    if len(wavs) > 0:
+                        all_audio.append(wavs[0])
             
             if not all_audio:
                 return None, None
@@ -209,3 +212,26 @@ class TTSEngine:
         except Exception as e:
             print(f"One-shot generation error: {e}")
             return None, None
+
+    def get_device_status(self):
+        status = {}
+        try:
+            # RAM
+            import psutil
+            vm = psutil.virtual_memory()
+            status["ram_percent"] = vm.percent
+            status["ram_used_gb"] = round(vm.used / (1024**3), 2)
+            
+            # VRAM (if CUDA)
+            if torch.cuda.is_available():
+                status["vram_reserved_gb"] = round(torch.cuda.memory_reserved() / (1024**3), 2)
+                status["vram_allocated_gb"] = round(torch.cuda.memory_allocated() / (1024**3), 2)
+                status["device_name"] = torch.cuda.get_device_name(0)
+            else:
+                status["vram_reserved_gb"] = 0
+                status["vram_allocated_gb"] = 0
+                status["device_name"] = "CPU"
+                
+            return status
+        except Exception as e:
+            return f"Error getting status: {e}"

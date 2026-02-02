@@ -5,13 +5,15 @@ from file_parser import parse_txt, parse_epub, parse_fb2
 import tempfile
 import soundfile as sf
 import glob
+import time
+import psutil
 
 # Initialize Engine (lazy loading will happen on first use)
 engine = TTSEngine()
 
-# Global variable to store the current voice prompt
-current_voice_prompt = None
-current_voice_name = "По умолчанию (Нет)"
+# State will be handled by Gradi State components inside the Blocks
+# Removing globals initialization here as they are now local to the session
+
 
 VOICES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voices")
 os.makedirs(VOICES_DIR, exist_ok=True)
@@ -22,23 +24,18 @@ def get_saved_voices():
     return ["Ничего"] + sorted(names)
 
 def load_voice_ui(voice_name):
-    global current_voice_prompt, current_voice_name
     if voice_name == "Ничего" or not voice_name:
-        current_voice_prompt = None
-        current_voice_name = "По умолчанию (Нет)"
-        return "Голос сброшен на стандартный."
+        return None, "По умолчанию (Нет)", "Голос сброшен на стандартный."
     
     path = os.path.join(VOICES_DIR, f"{voice_name}.pt")
     if os.path.exists(path):
         prompt = engine.load_voice_prompt(path)
         if prompt is not None:
-             current_voice_prompt = prompt
-             current_voice_name = voice_name
-             return f"Загружен голос: {voice_name}"
+             return prompt, voice_name, f"Загружен голос: {voice_name}"
         else:
-             return "Ошибка загрузки голоса."
+             return None, "По умолчанию (Нет)", "Ошибка загрузки голоса."
     else:
-        return "Файл голоса не найден."
+        return None, "По умолчанию (Нет)", "Файл голоса не найден."
 
 def switch_model_ui(model_name):
     status_msg = f"Переключение на модель {model_name}..."
@@ -69,18 +66,13 @@ def process_file_or_text(text_input, file_input):
             
     return content
 
-def generate_speech(text, file, voice_ref_audio, voice_ref_text, progress=gr.Progress()):
-    global current_voice_prompt
-    
+def generate_speech(text, file, voice_ref_audio, voice_ref_text, current_voice_prompt, progress=gr.Progress()):
     # 1. Get content
     content = process_file_or_text(text, file)
     if not content or len(content.strip()) == 0:
         return None, "Ошибка: Нет текста для озвучки."
         
     # 2. Determine voice strategy
-    # If user provided a reference audio in this call, use One-Shot
-    # If global prompt is set, use that.
-    # Otherwise, fail (Base model needs a clone reference) or allow if model supports it (Base usually doesn't without ref).
     
     status_msg = f"Генерация для {len(content)} символов..."
     print(status_msg)
@@ -106,8 +98,6 @@ def generate_speech(text, file, voice_ref_audio, voice_ref_text, progress=gr.Pro
              return None, "Ошибка: Вы должны предоставить образец голоса (аудио + текст) или создать профиль."
              
         if audio is not None:
-            # Save to temporary file for Gradio to play
-            # Gradio generic audio output wants a tuple (sr, data) or path
             return (sr, audio), "Готово!"
         else:
             return None, "Ошибка генерации."
@@ -116,17 +106,15 @@ def generate_speech(text, file, voice_ref_audio, voice_ref_text, progress=gr.Pro
         return None, f"Ошибка: {e}"
 
 def create_profile(ref_audio, ref_text, voice_name_save):
-    global current_voice_prompt, current_voice_name
-    
     if ref_audio is None or not ref_text:
-        return "Ошибка: Отсутствует аудио или текст."
+        return None, "По умолчанию (Нет)", "Ошибка: Отсутствует аудио или текст."
         
     print(f"Создание профиля из {ref_audio}...")
     prompt = engine.create_voice_prompt(ref_audio, ref_text)
     
     if prompt:
-        current_voice_prompt = prompt
-        current_voice_name = "Свой (unsaved)"
+        new_prompt = prompt
+        new_name = "Свой (unsaved)"
         msg = "Профиль создан (в памяти)."
         
         if voice_name_save and len(voice_name_save.strip()) > 0:
@@ -134,17 +122,27 @@ def create_profile(ref_audio, ref_text, voice_name_save):
             save_path = os.path.join(VOICES_DIR, f"{safe_name}.pt")
             saved = engine.save_voice_prompt(prompt, save_path)
             if saved:
-                current_voice_name = safe_name
+                new_name = safe_name
                 msg = f"Профиль создан и сохранен как '{safe_name}'!"
             else:
                 msg = "Профиль создан, но ошибка при сохранении."
         
-        return msg
+        return new_prompt, new_name, msg
     else:
-        return "Не удалось создать профиль голоса."
+        return None, "По умолчанию (Нет)", "Не удалось создать профиль голоса."
         
 def refresh_voices_list():
     return gr.Dropdown(choices=get_saved_voices())
+
+def update_monitor():
+    info = engine.get_device_status()
+    if isinstance(info, dict):
+        ram = f"RAM: {info['ram_used_gb']} GB ({info['ram_percent']}%)"
+        vram = ""
+        if info['device_name'] != "CPU":
+            vram = f" | VRAM: {info['vram_allocated_gb']} GB (Alloc) / {info['vram_reserved_gb']} GB (Rsrv)"
+        return f"{ram}{vram} [{info['device_name']}]"
+    return str(info)
 
 # --- UI Layout ---
 
@@ -182,7 +180,11 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
                     ref_audio_input = gr.Audio(label="Образец голоса (аудио файл)", type="filepath")
                     ref_text_input = gr.Textbox(label="Текст образца (что сказано в аудио)", placeholder="Напишите в точности то, что говорится в аудио...")
                     
-                    target_voice_status = gr.Markdown(f"Текущий профиль голоса: **{current_voice_name}**")
+                    # Component States
+                    voice_prompt_state = gr.State(None)
+                    voice_name_state = gr.State("По умолчанию (Нет)")
+
+                    target_voice_status = gr.Markdown(value="Текущий профиль голоса: **По умолчанию (Нет)**")
                     
                     generate_btn = gr.Button("Озвучить", variant="primary")
             
@@ -191,7 +193,7 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
             
             generate_btn.click(
                 fn=generate_speech,
-                inputs=[text_input, file_upload, ref_audio_input, ref_text_input],
+                inputs=[text_input, file_upload, ref_audio_input, ref_text_input, voice_prompt_state],
                 outputs=[output_audio, status_output]
             )
 
@@ -212,12 +214,10 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
             create_btn.click(
                 fn=create_profile,
                 inputs=[clone_audio, clone_text, save_name_input],
-                outputs=[profile_status]
-            )
-            # Update the status label in the other tab when profile changes
-            create_btn.click(
-                fn=lambda: f"Текущий профиль голоса: **{current_voice_name}**",
-                inputs=[],
+                outputs=[voice_prompt_state, voice_name_state, profile_status]
+            ).success( # Update status text after creation
+                fn=lambda name: f"Текущий профиль голоса: **{name}**",
+                inputs=[voice_name_state],
                 outputs=[target_voice_status]
             ).then( # Auto refresh list just in case
                 fn=refresh_voices_list,
@@ -227,9 +227,10 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
             voice_dropdown.change(
                  fn=load_voice_ui,
                  inputs=[voice_dropdown],
-                 outputs=[status_output] # Output status to main status box
+                 outputs=[voice_prompt_state, voice_name_state, status_output]
             ).then(
-                 fn=lambda: f"Текущий профиль голоса: **{current_voice_name}**",
+                 fn=lambda name: f"Текущий профиль голоса: **{name}**",
+                 inputs=[voice_name_state],
                  outputs=[target_voice_status]
             )
             
@@ -242,6 +243,25 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
             fn=switch_model_ui,
             inputs=[model_dropdown],
             outputs=[model_status]
+        )
+        
+        # Monitor
+        gr.Markdown("---")
+        with gr.Row():
+            monitor_toggle = gr.Checkbox(label="Включить мониторинг ресурсов", value=False)
+            monitor_display = gr.Textbox(label="Статус системы", value="Мониторинг отключен", interactive=False)
+            
+        timer = gr.Timer(1.0, active=False)
+        
+        monitor_toggle.change(
+            fn=lambda x: gr.Timer(active=x),
+            inputs=[monitor_toggle],
+            outputs=[timer]
+        )
+        
+        timer.tick(
+            fn=update_monitor,
+            outputs=[monitor_display]
         )
 
 if __name__ == "__main__":
