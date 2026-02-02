@@ -44,13 +44,14 @@ class TTSEngine:
                 print(f"Model {self.model_name} loaded with standard (eager) attention.")
 
         # Try to optimize with torch.compile (PyTorch 2.0+)
-        try:
-            if hasattr(torch, "compile") and self.device == "cuda":
-                print("Compiling model with torch.compile...")
-                # Reduce overhead mode is good for small batches/real-time
-                self.model.model = torch.compile(self.model.model, mode="reduce-overhead")
-        except Exception as e:
-            print(f"Compilation warning: {e}")
+        # Removed as per user request to speed up startup / visibility
+        # try:
+        #     if hasattr(torch, "compile") and self.device == "cuda":
+        #         print("Compiling model with torch.compile...")
+        #         # Reduce overhead mode is good for small batches/real-time
+        #         self.model.model = torch.compile(self.model.model, mode="reduce-overhead")
+        # except Exception as e:
+        #     print(f"Compilation warning: {e}")
 
     def switch_model(self, new_model_name):
         if self.model_name == new_model_name and self.model is not None:
@@ -150,6 +151,24 @@ class TTSEngine:
             return prompt
         except Exception as e:
             print(f"Error creating voice prompt: {e}")
+            return None
+
+    def save_voice_prompt(self, prompt, path):
+        try:
+            torch.save(prompt, path)
+            print(f"Saved voice prompt to {path}")
+            return True
+        except Exception as e:
+            print(f"Error saving voice prompt: {e}")
+            return False
+
+    def load_voice_prompt(self, path):
+        try:
+            prompt = torch.load(path) # default map_location?
+            print(f"Loaded voice prompt from {path}")
+            return prompt
+        except Exception as e:
+            print(f"Error loading voice prompt: {e}")
             return None
 
     def generate_with_audio_ref(self, text, ref_audio_path, ref_text, language="auto", progress_callback=None):

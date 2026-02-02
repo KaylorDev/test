@@ -4,6 +4,7 @@ from tts_engine import TTSEngine
 from file_parser import parse_txt, parse_epub, parse_fb2
 import tempfile
 import soundfile as sf
+import glob
 
 # Initialize Engine (lazy loading will happen on first use)
 engine = TTSEngine()
@@ -12,12 +13,40 @@ engine = TTSEngine()
 current_voice_prompt = None
 current_voice_name = "По умолчанию (Нет)"
 
+VOICES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voices")
+os.makedirs(VOICES_DIR, exist_ok=True)
+
+def get_saved_voices():
+    files = glob.glob(os.path.join(VOICES_DIR, "*.pt"))
+    names = [os.path.splitext(os.path.basename(f))[0] for f in files]
+    return ["Ничего"] + sorted(names)
+
+def load_voice_ui(voice_name):
+    global current_voice_prompt, current_voice_name
+    if voice_name == "Ничего" or not voice_name:
+        current_voice_prompt = None
+        current_voice_name = "По умолчанию (Нет)"
+        return "Голос сброшен на стандартный."
+    
+    path = os.path.join(VOICES_DIR, f"{voice_name}.pt")
+    if os.path.exists(path):
+        prompt = engine.load_voice_prompt(path)
+        if prompt is not None:
+             current_voice_prompt = prompt
+             current_voice_name = voice_name
+             return f"Загружен голос: {voice_name}"
+        else:
+             return "Ошибка загрузки голоса."
+    else:
+        return "Файл голоса не найден."
+
 def switch_model_ui(model_name):
     status_msg = f"Переключение на модель {model_name}..."
     print(status_msg)
     try:
         engine.switch_model(model_name)
-        return f"Модель успешно переключена на {model_name}"
+        device_name = engine.device.upper()
+        return f"Модель переключена на {model_name}. Устройство: {device_name}"
     except Exception as e:
         return f"Ошибка при смене модели: {e}"
 
@@ -86,7 +115,7 @@ def generate_speech(text, file, voice_ref_audio, voice_ref_text, progress=gr.Pro
     except Exception as e:
         return None, f"Ошибка: {e}"
 
-def create_profile(ref_audio, ref_text):
+def create_profile(ref_audio, ref_text, voice_name_save):
     global current_voice_prompt, current_voice_name
     
     if ref_audio is None or not ref_text:
@@ -97,10 +126,25 @@ def create_profile(ref_audio, ref_text):
     
     if prompt:
         current_voice_prompt = prompt
-        current_voice_name = "Свой голос (Готов)"
-        return "Профиль голоса успешно создан!"
+        current_voice_name = "Свой (unsaved)"
+        msg = "Профиль создан (в памяти)."
+        
+        if voice_name_save and len(voice_name_save.strip()) > 0:
+            safe_name = "".join([c for c in voice_name_save if c.isalpha() or c.isdigit() or c in (' ', '_', '-')]).strip()
+            save_path = os.path.join(VOICES_DIR, f"{safe_name}.pt")
+            saved = engine.save_voice_prompt(prompt, save_path)
+            if saved:
+                current_voice_name = safe_name
+                msg = f"Профиль создан и сохранен как '{safe_name}'!"
+            else:
+                msg = "Профиль создан, но ошибка при сохранении."
+        
+        return msg
     else:
         return "Не удалось создать профиль голоса."
+        
+def refresh_voices_list():
+    return gr.Dropdown(choices=get_saved_voices())
 
 # --- UI Layout ---
 
@@ -122,9 +166,17 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
                         choices=["Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"],
                         value="Qwen/Qwen3-TTS-12Hz-1.7B-Base"
                     )
-                    model_status = gr.Textbox(label="Статус модели", value="Модель 1.7B (Base) готова к использованию", interactive=False)
+                    model_status = gr.Textbox(label="Статус модели", value=f"Модель 1.7B (Base). Устройство: {engine.device.upper()}", interactive=False)
                     
                     gr.Markdown("### Настройки голоса")
+                    
+                    voice_dropdown = gr.Dropdown(
+                        label="Выберите сохраненный голос",
+                        choices=get_saved_voices(),
+                        value="Ничего",
+                        interactive=True
+                    )
+                    refresh_voices_btn = gr.Button("Обновить список голосов", size="sm")
                     
                     # Quick Clone inputs right here for convenience
                     ref_audio_input = gr.Audio(label="Образец голоса (аудио файл)", type="filepath")
@@ -151,21 +203,39 @@ with gr.Blocks(title="Qwen3-TTS Читалка") as demo:
                 with gr.Column():
                     clone_audio = gr.Audio(label="Загрузить образец голоса", type="filepath")
                     clone_text = gr.Textbox(label="Текст образца", placeholder="Введите точный текст из образца...")
-                    create_btn = gr.Button("Создать профиль голоса")
+                    save_name_input = gr.Textbox(label="Имя для сохранения (опционально)", placeholder="Например: MyVoice1")
+                    create_btn = gr.Button("Создать и, если имя задано, сохранить профиль")
                 
                 with gr.Column():
                     profile_status = gr.Textbox(label="Результат")
             
             create_btn.click(
                 fn=create_profile,
-                inputs=[clone_audio, clone_text],
+                inputs=[clone_audio, clone_text, save_name_input],
                 outputs=[profile_status]
             )
             # Update the status label in the other tab when profile changes
             create_btn.click(
-                fn=lambda: f"Текущий профиль голоса: **Свой голос (Готов)**",
+                fn=lambda: f"Текущий профиль голоса: **{current_voice_name}**",
                 inputs=[],
                 outputs=[target_voice_status]
+            ).then( # Auto refresh list just in case
+                fn=refresh_voices_list,
+                outputs=[voice_dropdown]
+            )
+            
+            voice_dropdown.change(
+                 fn=load_voice_ui,
+                 inputs=[voice_dropdown],
+                 outputs=[status_output] # Output status to main status box
+            ).then(
+                 fn=lambda: f"Текущий профиль голоса: **{current_voice_name}**",
+                 outputs=[target_voice_status]
+            )
+            
+            refresh_voices_btn.click(
+                fn=refresh_voices_list,
+                outputs=[voice_dropdown]
             )
 
         model_dropdown.change(
